@@ -1,0 +1,12 @@
+{
+  "description": "Process one video file or one directory of RGB frames with the single-video pipeline.",
+  "script": "tools/Inference_video.py",
+  "arguments": [
+    "--dataset", "data/video_1",
+    "--output_dir", "outputs/video_1",
+    "--mast3r_root", "MASt3R-SLAM-main",
+    "--sam2_checkpoint", "checkpoints/sam2.1_hiera_large.pt",
+    "--sam2_config", "../sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
+    "--device", "cuda:0"
+  ]
+}

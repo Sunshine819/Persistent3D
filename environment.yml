@@ -1,0 +1,11 @@
+name: persistent3d
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - git
+  - cmake
+  - ninja
+  - pip:
+      - -r requirements.txt

@@ -1,0 +1,81 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# Virtual environments and local settings
+.venv/
+venv/
+env/
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Datasets, generated artifacts, and logs
+data/
+datasets/
+outputs/
+logs/
+runs/
+wandb/
+*.log
+
+# Third-party source trees installed by scripts/setup_external.*
+sam2/
+MASt3R-SLAM-main/
+RoboSpatial-main/
+models/
+third_party/
+
+# Metadata inherited from the original third-party SAM 2 source tree
+/CODE_OF_CONDUCT.md
+/CONTRIBUTING.md
+/INSTALL.md
+/LICENSE
+/LICENSE_cctorch
+/MANIFEST.in
+/pyproject.toml
+/RELEASE_NOTES.md
+/setup.py
+
+# Model weights and other large binary artifacts
+checkpoints/*
+!checkpoints/.gitkeep
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+*.onnx
+*.engine
+*.gguf
+*.pkl
+*.npz
+
+# Common generated 3D/media/document files
+*.npy
+*.ply
+*.xyz
+*.obj
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.zip
+*.pptx
+
+# Build artifacts
+build/
+dist/
+_C.*
+cmake-build-*/

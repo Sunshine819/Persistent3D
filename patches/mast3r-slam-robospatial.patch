@@ -1,0 +1,274 @@
+diff --git a/main.py b/main.py
+--- a/main.py
++++ b/main.py
+@@ -13,14 +13,40 @@ from mast3r_slam.config import load_config, config, set_global_config
+ from mast3r_slam.dataloader import Intrinsics, load_dataset
+ import mast3r_slam.evaluate as eval
+-from mast3r_slam.frame import Mode, SharedKeyframes, SharedStates, create_frame
++from mast3r_slam.frame import Frame, Mode, SharedKeyframes, SharedStates, create_frame
+ from mast3r_slam.mast3r_utils import (
+     load_mast3r,
+     load_retriever,
+     mast3r_inference_mono,
+ )
+ from mast3r_slam.multiprocess_utils import new_queue, try_get_msg
+ from mast3r_slam.tracker import FrameTracker
+-from mast3r_slam.visualization import WindowMsg, run_visualization
++
++class _NoVizWindowMsg:
++    is_terminated = False
++    is_paused = False
++    next = False
++    C_conf_threshold = 1.5
++
++
+ import torch.multiprocessing as mp
+ 
++
++def clone_frame_for_export(frame: Frame) -> Frame:
++    export_frame = Frame(
++        frame.frame_id,
++        frame.img.detach().cpu().clone(),
++        frame.img_shape.detach().cpu().clone(),
++        frame.img_true_shape.detach().cpu().clone(),
++        frame.uimg.detach().cpu().clone(),
++        lietorch.Sim3(frame.T_WC.data.detach().cpu().clone()),
++    )
++    export_frame.X_canon = frame.X_canon.detach().cpu().clone()
++    export_frame.C = frame.C.detach().cpu().clone()
++    export_frame.N = frame.N
++    export_frame.N_updates = frame.N_updates
++    if frame.K is not None:
++        export_frame.K = frame.K.detach().cpu().clone()
++    return export_frame
++
++
+ def relocalization(frame, keyframes, factor_graph, retrieval_database):
+@@ -145,5 +172,6 @@ if __name__ == "__main__":
+     parser.add_argument("--save-as", default="default")
+     parser.add_argument("--no-viz", action="store_true")
+     parser.add_argument("--calib", default="")
++    parser.add_argument("--export-robospatial", action="store_true")
+ 
+     args = parser.parse_args()
+@@ -173,6 +201,7 @@ if __name__ == "__main__":
+     keyframes = SharedKeyframes(manager, h, w)
+     states = SharedStates(manager, h, w)
+     if not args.no_viz:
++        from mast3r_slam.visualization import WindowMsg, run_visualization
+         viz = mp.Process(
+             target=run_visualization,
+             args=(config, states, keyframes, main2viz, viz2main),
+@@ -204,6 +233,6 @@ if __name__ == "__main__":
+         recon_file.unlink()
+ 
+     tracker = FrameTracker(model, keyframes, device)
+-    last_msg = WindowMsg()
++    last_msg = _NoVizWindowMsg() if args.no_viz else WindowMsg()
+     backend = mp.Process(target=run_backend, args=(config, model, states, keyframes, K))
+     backend.start()
+@@ -213,5 +242,6 @@ if __name__ == "__main__":
+     fps_timer = time.time()
+ 
+     frames = []
++    export_frames = []
+ 
+     while True:
+@@ -250,5 +280,6 @@ if __name__ == "__main__":
+             states.queue_global_optimization(len(keyframes) - 1)
+             states.set_mode(Mode.TRACKING)
+             states.set_frame(frame)
++            export_frames.append(clone_frame_for_export(frame))
+             i += 1
+             continue
+@@ -258,10 +289,13 @@ if __name__ == "__main__":
+             if try_reloc:
+                 states.set_mode(Mode.RELOC)
+             states.set_frame(frame)
++            if frame.X_canon is not None and frame.C is not None:
++                export_frames.append(clone_frame_for_export(frame))
+         elif mode == Mode.RELOC:
+             X, C = mast3r_inference_mono(model, frame)
+             frame.update_pointmap(X, C)
+             states.set_frame(frame)
+             states.queue_reloc()
++            export_frames.append(clone_frame_for_export(frame))
+             # In single threaded mode, make sure relocalization happen for every frame
+             while config["single_thread"]:
+@@ -297,5 +331,15 @@ if __name__ == "__main__":
+         eval.save_keyframes(
+             save_dir / "keyframes" / seq_name, dataset.timestamps, keyframes
+         )
++        if args.export_robospatial:
++            robospatial_dir = eval.save_robospatial_scene(
++                save_dir,
++                seq_name,
++                dataset,
++                keyframes,
++                config["tracking"]["C_conf"],
++                export_frames=export_frames,
++            )
++            print(f"robospatial export: {robospatial_dir}")
+     if save_frames:
+         savedir = pathlib.Path(f"logs/frames/{datetime_now}")
+diff --git a/mast3r_slam/evaluate.py b/mast3r_slam/evaluate.py
+--- a/mast3r_slam/evaluate.py
++++ b/mast3r_slam/evaluate.py
+@@ -45,5 +45,7 @@ def save_reconstruction(savedir, filename, keyframes, c_conf_threshold):
+     savedir.mkdir(exist_ok=True, parents=True)
+     pointclouds = []
+     colors = []
++    source_keyframe_indices = []
++    source_pixel_indices = []
+     for i in range(len(keyframes)):
+         keyframe = keyframes[i]
+@@ -58,8 +60,19 @@ def save_reconstruction(savedir, filename, keyframes, c_conf_threshold):
+             keyframe.get_average_conf().cpu().numpy().astype(np.float32).reshape(-1)
+             > c_conf_threshold
+         )
++        valid &= np.isfinite(pW).all(axis=1)
+         pointclouds.append(pW[valid])
+         colors.append(color[valid])
++        source_keyframe_indices.append(np.full(int(valid.sum()), i, dtype=np.int32))
++        source_pixel_indices.append(np.flatnonzero(valid).astype(np.int32))
+     pointclouds = np.concatenate(pointclouds, axis=0)
+     colors = np.concatenate(colors, axis=0)
++    source_keyframe_indices = np.concatenate(source_keyframe_indices, axis=0)
++    source_pixel_indices = np.concatenate(source_pixel_indices, axis=0)
+     save_ply(savedir / filename, pointclouds, colors)
++    provenance_path = savedir / f"{pathlib.Path(filename).stem}.provenance.npz"
++    np.savez_compressed(
++        provenance_path,
++        source_keyframe_index=source_keyframe_indices,
++        source_pixel_index=source_pixel_indices,
++    )
+@@ -98,3 +111,129 @@ def save_ply(filename, points, colors):
+     vertex_element = PlyElement.describe(pcd, "vertex")
+     ply_data = PlyData([vertex_element], text=False)
+     ply_data.write(filename)
++
++
++def save_robospatial_scene(savedir, seq_name, dataset, keyframes, c_conf_threshold, export_frames=None):
++    import pathlib
++    import cv2
++    import numpy as np
++    from mast3r_slam.config import config
++    from mast3r_slam.geometry import constrain_points_to_ray
++    from mast3r_slam.lietorch_utils import as_SE3
++
++    savedir = pathlib.Path(savedir) / "robospatial" / seq_name
++    color_dir = savedir / "sequence" / "color"
++    depth_dir = savedir / "sequence" / "depth"
++    pose_dir = savedir / "sequence" / "camera_poses"
++    for directory in (color_dir, depth_dir, pose_dir):
++        directory.mkdir(exist_ok=True, parents=True)
++
++    keyframe_stems = [
++        _mast3r_export_frame_stem(dataset, keyframes[i].frame_id)
++        for i in range(len(keyframes))
++    ]
++    with open(savedir / "sequence" / "keyframes.txt", "w", encoding="utf-8") as f:
++        f.write("\n".join(keyframe_stems) + ("\n" if keyframe_stems else ""))
++
++    first_keyframe = keyframes[0]
++    if export_frames is None:
++        frames_to_export = [keyframes[i] for i in range(len(keyframes))]
++    else:
++        keyframes_by_id = {keyframes[i].frame_id: keyframes[i] for i in range(len(keyframes))}
++        frames_to_export = [
++            keyframes_by_id.get(frame.frame_id, frame)
++            for frame in export_frames
++            if frame.X_canon is not None and frame.C is not None
++        ]
++        frames_to_export.sort(key=lambda frame: frame.frame_id)
++
++    height, width = first_keyframe.uimg.shape[:2]
++
++    if config["use_calib"] and first_keyframe.K is not None:
++        K = first_keyframe.K.detach().cpu().numpy()
++        fx, fy, cx, cy = K[0, 0], K[1, 1], K[0, 2], K[1, 2]
++    else:
++        fx = fy = float(max(width, height))
++        cx = float(width) / 2.0
++        cy = float(height) / 2.0
++
++    intrinsic = np.array(
++        [
++            [fx, 0.0, cx, 0.0],
++            [0.0, fy, cy, 0.0],
++            [0.0, 0.0, 1.0, 0.0],
++            [0.0, 0.0, 0.0, 1.0],
++        ],
++        dtype=np.float64,
++    )
++
++    info_path = pose_dir / "_info.txt"
++    with open(info_path, "w") as f:
++        f.write("m_versionNumber = 4\n")
++        f.write("m_sensorName = mast3r_slam_export\n")
++        f.write(f"m_colorWidth = {width}\n")
++        f.write(f"m_colorHeight = {height}\n")
++        f.write(f"m_depthWidth = {width}\n")
++        f.write(f"m_depthHeight = {height}\n")
++        f.write("m_depthShift = 1\n")
++        f.write(
++            "m_calibrationColorIntrinsic = "
++            + " ".join(f"{v:.9g}" for v in intrinsic.reshape(-1))
++            + "\n"
++        )
++        f.write(
++            "m_calibrationColorExtrinsic = "
++            + " ".join(f"{v:.9g}" for v in np.eye(4).reshape(-1))
++            + "\n"
++        )
++        f.write(
++            "m_calibrationDepthIntrinsic = "
++            + " ".join(f"{v:.9g}" for v in intrinsic.reshape(-1))
++            + "\n"
++        )
++        f.write(
++            "m_calibrationDepthExtrinsic = "
++            + " ".join(f"{v:.9g}" for v in np.eye(4).reshape(-1))
++            + "\n"
++        )
++        f.write(f"m_frames.size = {len(frames_to_export)}\n")
++
++    for keyframe in frames_to_export:
++        frame_id = _mast3r_export_frame_stem(dataset, keyframe.frame_id)
++
++        rgb = (keyframe.uimg.cpu().numpy() * 255).clip(0, 255).astype(np.uint8)
++        cv2.imwrite(str(color_dir / f"{frame_id}.png"), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
++
++        points = keyframe.X_canon.detach()
++        if config["use_calib"]:
++            points = constrain_points_to_ray(
++                keyframe.img_shape.flatten()[:2],
++                points[None],
++                keyframe.K,
++            ).squeeze(0)
++
++        points = points.cpu().numpy().reshape(height, width, 3)
++        conf = keyframe.get_average_conf().cpu().numpy().reshape(height, width)
++        depth = points[..., 2].astype(np.float32)
++        valid = np.isfinite(depth) & (depth > 0.0) & (conf > c_conf_threshold)
++        depth = np.where(valid, depth, 0.0).astype(np.float32)
++        np.save(depth_dir / f"{frame_id}.depth.npy", depth)
++
++        T_WC = as_SE3(keyframe.T_WC).matrix().numpy().reshape(4, 4)
++        np.savetxt(pose_dir / f"{frame_id}.txt", T_WC, fmt="%.9g")
++
++    return savedir
++
++
++def _mast3r_export_frame_stem(dataset, frame_id):
++    import pathlib
++
++    rgb_files = getattr(dataset, "rgb_files", None)
++    if rgb_files is not None and frame_id < len(rgb_files):
++        return pathlib.Path(rgb_files[frame_id]).stem
++
++    timestamps = getattr(dataset, "timestamps", None)
++    if timestamps is not None and frame_id < len(timestamps):
++        return str(timestamps[frame_id]).replace(".", "_")
++
++    return f"{frame_id:06d}"

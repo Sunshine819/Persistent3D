@@ -1,0 +1,12 @@
+{
+  "description": "Process one scene selected from a ScanNet-style multi-scene dataset root.",
+  "script": "tools/inference_scan.py",
+  "arguments": [
+    "--dataset", "data/scannet",
+    "--output_dir", "outputs/scan",
+    "--mast3r_root", "MASt3R-SLAM-main",
+    "--sam2_checkpoint", "checkpoints/sam2.1_hiera_large.pt",
+    "--sam2_config", "../sam2/configs/sam2.1/sam2.1_hiera_l.yaml",
+    "--device", "cuda:0"
+  ]
+}
